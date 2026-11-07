@@ -1,0 +1,362 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Movement Detection</title>
+
+    <style>
+        body {
+            background: #101827;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #38bdf8;
+        }
+
+        .camera-container {
+            position: relative;
+            width: 640px;
+            max-width: 100%;
+            margin: 20px auto;
+        }
+
+        video, canvas {
+            width: 100%;
+            border-radius: 12px;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        button {
+            padding: 12px 22px;
+            margin: 8px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 15px;
+        }
+
+        .start {
+            background: #22c55e;
+            color: white;
+        }
+
+        .stop {
+            background: #ef4444;
+            color: white;
+        }
+
+        .reset {
+            background: #2563eb;
+            color: white;
+        }
+
+        .info {
+            background: #1e293b;
+            padding: 15px;
+            margin: 15px auto;
+            max-width: 600px;
+            border-radius: 10px;
+        }
+
+        #status {
+            color: #38bdf8;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Live Webcam Movement Detection</h1>
+
+    <p>Real-time person detection using YOLO and OpenCV</p>
+
+    <div class="camera-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <div>
+        <button class="start" onclick="startCamera()">
+            Start Camera
+        </button>
+
+        <button class="stop" onclick="stopCamera()">
+            Stop Camera
+        </button>
+
+        <button class="reset" onclick="resetDetection()">
+            Reset Detection
+        </button>
+        <a href="/live-history"
+   style="display:inline-block; padding:12px 22px;
+   margin:8px; background:#7c3aed; color:white;
+   text-decoration:none; border-radius:8px;">
+    View Detection History
+</a>
+    </div>
+
+    <div class="info">
+        <h3>Detection Information</h3>
+
+        <p>Status: <span id="status">Camera stopped</span></p>
+
+        <p>Person Detected:
+            <span id="person">No</span>
+        </p>
+
+        <p>Movement:
+            <span id="movement">Waiting...</span>
+        </p>
+
+        <p>Person Count:
+            <span id="count">0</span>
+        </p>
+    </div>
+
+<script>
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let cameraStream = null;
+let detectionInterval = null;
+let processing = false;
+
+async function startCamera() {
+
+    try {
+
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: 640,
+                height: 480
+            },
+            audio: false
+        });
+
+        video.srcObject = cameraStream;
+
+        await video.play();
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        document.getElementById("status").innerText =
+            "Camera running";
+
+        if (detectionInterval) {
+            clearInterval(detectionInterval);
+        }
+
+        detectionInterval = setInterval(
+            detectFrame, 300
+        );
+
+    } catch (error) {
+
+        alert("Camera error: " + error.message);
+
+    }
+}
+
+async function detectFrame() {
+
+    if (!cameraStream || processing ||
+        video.readyState < 2) {
+        return;
+    }
+
+    processing = true;
+
+    try {
+
+        const tempCanvas = document.createElement("canvas");
+
+        tempCanvas.width = video.videoWidth;
+        tempCanvas.height = video.videoHeight;
+
+        const tempCtx = tempCanvas.getContext("2d");
+
+        tempCtx.drawImage(
+            video,
+            0,
+            0,
+            tempCanvas.width,
+            tempCanvas.height
+        );
+
+        const image = tempCanvas.toDataURL(
+            "image/jpeg", 0.7
+        ).split(",")[1];
+
+        const response = await fetch("/api/live-detect", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+                image: image
+            })
+
+        });
+
+        if (!response.ok) {
+            throw new Error("Detection server error");
+        }
+
+        const data = await response.json();
+        // Save a detection record every 5 seconds
+if (!window.lastSavedTime ||
+    Date.now() - window.lastSavedTime >= 5000) {
+
+    window.lastSavedTime = Date.now();
+
+    fetch("/api/live-log", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            count: data.count,
+            movement: data.movement
+        })
+    }).catch(error => console.error("History save error:", error));
+}
+
+drawDetections(data);
+
+
+        document.getElementById("person").innerText =
+            data.person_detected ? "Yes" : "No";
+
+        document.getElementById("movement").innerText =
+            data.movement ?? "Unknown";
+
+        document.getElementById("count").innerText =
+            data.count ?? 0;
+
+        document.getElementById("status").innerText =
+            "Detecting...";
+
+    } catch (error) {
+
+        console.error(error);
+
+        document.getElementById("status").innerText =
+            "Detection error";
+
+    } finally {
+
+        processing = false;
+
+    }
+}
+
+function drawDetections(data) {
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const boxes = data.boxes || [];
+
+    const scaleX = canvas.width / (data.width || canvas.width);
+    const scaleY = canvas.height / (data.height || canvas.height);
+
+    boxes.forEach(box => {
+
+        const x = box.x1 * scaleX;
+        const y = box.y1 * scaleY;
+        const w = (box.x2 - box.x1) * scaleX;
+        const h = (box.y2 - box.y1) * scaleY;
+
+        ctx.strokeStyle = "#22c55e";
+        ctx.lineWidth = 3;
+
+        ctx.strokeRect(x, y, w, h);
+
+        ctx.fillStyle = "#22c55e";
+        ctx.font = "16px Arial";
+
+        ctx.fillText(
+            "Person " + Math.round(box.confidence * 100) + "%",
+            x,
+            Math.max(18, y - 8)
+        );
+
+    });
+
+}
+
+async function resetDetection() {
+
+    try {
+
+        const response = await fetch("/api/live-reset", {
+            method: "POST"
+        });
+
+        const data = await response.json();
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        document.getElementById("person").innerText = "No";
+        document.getElementById("movement").innerText = "Waiting...";
+        document.getElementById("count").innerText = "0";
+
+        document.getElementById("status").innerText =
+            data.message || "Detection reset";
+
+    } catch (error) {
+
+        console.error(error);
+        alert("Could not reset detection.");
+
+    }
+}
+
+function stopCamera() {
+
+    if (detectionInterval) {
+        clearInterval(detectionInterval);
+        detectionInterval = null;
+    }
+
+    if (cameraStream) {
+
+        cameraStream.getTracks().forEach(track => {
+            track.stop();
+        });
+
+        cameraStream = null;
+
+    }
+
+    video.srcObject = null;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    document.getElementById("status").innerText =
+        "Camera stopped";
+
+}
+
+window.addEventListener("beforeunload", stopCamera);
+
+</script>
+
+</body>
+</html>
